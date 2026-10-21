@@ -7,7 +7,28 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
+import com.app.aestudio.ui.state.MediaItem
+import com.app.aestudio.ui.state.MediaKind
+import com.app.aestudio.utils.MediaImporter
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
@@ -60,7 +81,7 @@ import com.app.aestudio.ui.theme.AeColors
 import com.app.aestudio.utils.simClickable
 import com.app.aestudio.utils.simTarget
 
-private enum class ItemKind { Folder, Composition, Image, Audio }
+private enum class ItemKind { Folder, Composition, Image, Audio, Video }
 
 /** Left column: Project assets tree on top, Effects & Presets search below. */
 @Composable
@@ -86,21 +107,23 @@ fun LeftPanel(state: WorkspaceState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PanelHeader(title: String) {
-    Box(
+private fun PanelHeader(title: String, trailing: (@Composable () -> Unit)? = null) {
+    Row(
         Modifier
             .fillMaxWidth()
             .height(22.dp)
             .background(AeColors.PanelHeader)
             .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.CenterStart
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = title,
+            modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             color = AeColors.TextPrimary
         )
+        trailing?.invoke()
     }
 }
 
@@ -109,8 +132,41 @@ private fun PanelHeader(title: String) {
 @Composable
 private fun ProjectPanel(state: WorkspaceState, modifier: Modifier) {
     val scroll = rememberScrollState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // System folder picker: pick any folder, all video / audio / image files inside are imported.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            state.beginImport()
+            scope.launch {
+                try {
+                    runCatching {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    }
+                    val result = MediaImporter.scan(context, uri)
+                    state.finishImport(result.folderName, result.items, result.truncated)
+                } catch (e: Exception) {
+                    state.failImport(e.message)
+                }
+            }
+        }
+    }
+    val importFolder: () -> Unit = { picker.launch(null) }
+
     Column(modifier.background(AeColors.Panel)) {
-        PanelHeader("Project")
+        PanelHeader("Project") {
+            Text(
+                text = "Import",
+                modifier = Modifier
+                    .simClickable(state.simulator, "project.import", onClick = importFolder)
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = AeColors.Accent
+            )
+        }
         Column(
             Modifier
                 .weight(1f)
@@ -125,6 +181,7 @@ private fun ProjectPanel(state: WorkspaceState, modifier: Modifier) {
                 TreeRow(state, "Logo.png", "Logo.png", ItemKind.Image, 1) { state.selectProjectItem("Logo.png") }
                 TreeRow(state, "Audio.mp3", "Audio.mp3", ItemKind.Audio, 1) { state.selectProjectItem("Audio.mp3") }
             }
+            ImportedMedia(state, importFolder)
         }
     }
 }
@@ -238,6 +295,23 @@ private fun ItemGlyph(kind: ItemKind) {
                     close()
                 }
                 drawPath(hill, Color.White.copy(alpha = 0.6f))
+            }
+            ItemKind.Video -> {
+                drawRoundRect(
+                    color = Color(0xFFE2A04A),
+                    topLeft = Offset(0f, h * 0.15f),
+                    size = Size(w, h * 0.7f),
+                    cornerRadius = CornerRadius(w * 0.12f)
+                )
+                drawPath(
+                    Path().apply {
+                        moveTo(w * 0.38f, h * 0.32f)
+                        lineTo(w * 0.72f, h * 0.5f)
+                        lineTo(w * 0.38f, h * 0.68f)
+                        close()
+                    },
+                    Color.White.copy(alpha = 0.9f)
+                )
             }
             ItemKind.Audio -> {
                 val heights = floatArrayOf(0.35f, 0.8f, 0.55f, 0.95f)
@@ -378,4 +452,137 @@ private fun BlinkingCaret() {
             .alpha(alpha)
             .background(AeColors.Accent)
     )
+}
+
+/** Imported folder, grouped into Video / Audio / Images. Rows can be dragged onto the timeline. */
+@Composable
+private fun ImportedMedia(state: WorkspaceState, onImport: () -> Unit) {
+    val folder = state.importedFolderName
+    if (state.importing) {
+        Text(
+            text = "Importing...",
+            modifier = Modifier.padding(10.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = AeColors.TextSecondary
+        )
+    } else if (folder == null) {
+        Text(
+            text = "Click here to import a folder",
+            modifier = Modifier
+                .fillMaxWidth()
+                .simClickable(state.simulator, "project.import.empty", onClick = onImport)
+                .padding(10.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = AeColors.Accent
+        )
+    } else {
+        TreeRow(state, "imported", folder, ItemKind.Folder, 0, expanded = state.importedExpanded) {
+            state.importedExpanded = !state.importedExpanded
+        }
+        if (state.importedExpanded) {
+            MediaKind.entries.forEach { kind ->
+                val files = state.mediaOf(kind)
+                if (files.isNotEmpty()) {
+                    val open = kind !in state.collapsedKinds
+                    TreeRow(state, "group.${kind.name}", "${kind.label} (${files.size})", ItemKind.Folder, 1, expanded = open) {
+                        state.toggleKind(kind)
+                    }
+                    if (open) files.forEach { MediaRow(state, it, 2) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaRow(state: WorkspaceState, item: MediaItem, depth: Int) {
+    val key = "media.${item.id}"
+    val selected = state.selectedProjectItem == item.id
+    val hovered = state.simulator.hoveredKey == key
+    val dragging = state.dragMedia?.id == item.id
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    val glyph = when (item.kind) {
+        MediaKind.Video -> ItemKind.Video
+        MediaKind.Audio -> ItemKind.Audio
+        MediaKind.Image -> ItemKind.Image
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(20.dp)
+            .alpha(if (dragging) 0.45f else 1f)
+            .onGloballyPositioned { origin = it.positionInRoot() }
+            .background(
+                when {
+                    selected -> AeColors.AccentSoft
+                    hovered -> AeColors.PanelRaised
+                    else -> Color.Transparent
+                }
+            )
+            .clickable { state.selectProjectItem(item.id) }
+            .simTarget(
+                simulator = state.simulator,
+                key = key,
+                onTap = { state.selectProjectItem(item.id) },
+                // Virtual trackpad: hold + drag. The cursor position is the drag position.
+                onDragStart = { state.beginMediaDrag(item, state.cursor) },
+                onDrag = { delta, _ -> state.dragMediaBy(delta) },
+                onDragEnd = { state.endMediaDrag() },
+            )
+            // Real finger: long-press, then drag.
+            .pointerInput(item.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { local -> state.beginMediaDrag(item, origin + local) },
+                    onDrag = { change, delta ->
+                        change.consume()
+                        state.dragMediaBy(delta)
+                    },
+                    onDragEnd = { state.endMediaDrag() },
+                    onDragCancel = { state.endMediaDrag() },
+                )
+            }
+            .padding(start = (6 + depth * 14).dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Spacer(Modifier.width(14.dp))
+        ItemGlyph(glyph)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = item.name,
+            style = MaterialTheme.typography.bodySmall,
+            color = AeColors.TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** Small label that follows the finger / virtual cursor while a media file is being dragged. */
+@Composable
+fun MediaDragGhost(state: WorkspaceState) {
+    val item = state.dragMedia ?: return
+    val shape = RoundedCornerShape(4.dp)
+    val glyph = when (item.kind) {
+        MediaKind.Video -> ItemKind.Video
+        MediaKind.Audio -> ItemKind.Audio
+        MediaKind.Image -> ItemKind.Image
+    }
+    Row(
+        modifier = Modifier
+            .offset { IntOffset(state.dragPos.x.roundToInt() + 14, state.dragPos.y.roundToInt() + 14) }
+            .zIndex(998f)
+            .background(AeColors.PanelRaised.copy(alpha = 0.95f), shape)
+            .border(1.dp, if (state.dropActive) AeColors.Accent else AeColors.Hairline, shape)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ItemGlyph(glyph)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = item.name,
+            style = MaterialTheme.typography.labelSmall,
+            color = AeColors.TextPrimary,
+            maxLines = 1
+        )
+    }
 }
