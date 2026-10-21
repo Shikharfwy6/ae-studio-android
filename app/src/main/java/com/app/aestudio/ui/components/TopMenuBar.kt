@@ -73,6 +73,7 @@ private val Menus = listOf(
         MenuItemDef("New Image Layer") { addLayer(LayerKind.Image) },
     )),
     MenuDef("Effect", listOf(
+        MenuItemDef("Position") { applyEffectByName("Position") },
         MenuItemDef("Gaussian Blur") { applyEffectByName("Gaussian Blur") },
         MenuItemDef("Glow") { applyEffectByName("Glow") },
         MenuItemDef("Drop Shadow") { applyEffectByName("Drop Shadow") },
