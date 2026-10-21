@@ -34,7 +34,7 @@ enum class Tool(val shortcut: Char, val displayName: String) {
     Type('T', "Type"),
 }
 
-enum class LayerKind { Text, Image, Solid }
+enum class LayerKind { Text, Image, Solid, Video, Audio }
 
 data class TimelineLayer(
     val id: Int,
@@ -43,11 +43,31 @@ data class TimelineLayer(
     val inPoint: Float,
     val outPoint: Float,
     val effects: List<String> = emptyList(),
+    val posX: Float = 0f,
+    val posY: Float = 0f,
+    val posZ: Float = 0f,
+    val mediaId: String? = null,
 )
 
 data class EffectPreset(val name: String, val category: String)
 
+const val POSITION_EFFECT = "Position"
+val PosXRange = -1000f..1000f
+val PosYRange = -600f..600f
+val PosZRange = -500f..1500f
+
+enum class MediaKind(val label: String) { Video("Video"), Audio("Audio"), Image("Images") }
+
+data class MediaItem(
+    val id: String,
+    val name: String,
+    val kind: MediaKind,
+    val uri: String,
+    val sizeBytes: Long,
+)
+
 val EffectCatalog = listOf(
+    EffectPreset(POSITION_EFFECT, "Transform"),
     EffectPreset("Gaussian Blur", "Blur & Sharpen"),
     EffectPreset("Fast Box Blur", "Blur & Sharpen"),
     EffectPreset("Directional Blur", "Blur & Sharpen"),
@@ -222,6 +242,13 @@ class WorkspaceState {
             return
         }
         val layer = layers[index]
+        if (effect.name == POSITION_EFFECT) {
+            if (POSITION_EFFECT in layer.effects) {
+                message("${layer.name} already has Position")
+                return
+            }
+            positionPanelOpen = true
+        }
         layers[index] = layer.copy(effects = layer.effects + effect.name)
         message("Applied ${effect.name} to ${layer.name}")
     }
@@ -293,6 +320,8 @@ class WorkspaceState {
             LayerKind.Text -> "Text Layer $n"
             LayerKind.Image -> "Image $n"
             LayerKind.Solid -> "Solid $n"
+            LayerKind.Video -> "Video $n"
+            LayerKind.Audio -> "Audio $n"
         }
         val layer = TimelineLayer(nextLayerId++, name, kind, 0f, TIMELINE_DURATION_SECONDS)
         layers.add(0, layer)
@@ -316,6 +345,108 @@ class WorkspaceState {
         val removed = layers.removeAt(index)
         selectedLayerId = layers.firstOrNull()?.id
         message("Deleted ${removed.name}")
+    }
+
+    // ---- Position effect (X / Y / Z) ----------------------------------------------------
+    var positionPanelOpen by mutableStateOf(true)
+
+    fun setPosition(layerId: Int, x: Float? = null, y: Float? = null, z: Float? = null) {
+        val i = layers.indexOfFirst { it.id == layerId }
+        if (i < 0) return
+        val l = layers[i]
+        layers[i] = l.copy(posX = x ?: l.posX, posY = y ?: l.posY, posZ = z ?: l.posZ)
+    }
+
+    fun resetPosition(layerId: Int) {
+        setPosition(layerId, 0f, 0f, 0f)
+        message("Position reset")
+    }
+
+    // ---- Folder import + drag and drop ---------------------------------------------------
+    val mediaItems = mutableStateListOf<MediaItem>()
+    var importedFolderName by mutableStateOf<String?>(null)
+        private set
+    var importing by mutableStateOf(false)
+        private set
+    var importedExpanded by mutableStateOf(true)
+    var collapsedKinds by mutableStateOf(setOf<MediaKind>())
+        private set
+
+    fun toggleKind(kind: MediaKind) {
+        collapsedKinds = if (kind in collapsedKinds) collapsedKinds - kind else collapsedKinds + kind
+    }
+
+    fun mediaOf(kind: MediaKind): List<MediaItem> = mediaItems.filter { it.kind == kind }
+
+    fun beginImport() {
+        importing = true
+        message("Importing folder...")
+    }
+
+    fun finishImport(folder: String, items: List<MediaItem>, truncated: Boolean) {
+        mediaItems.clear()
+        mediaItems.addAll(items.sortedBy { it.name.lowercase() })
+        importedFolderName = folder
+        importedExpanded = true
+        importing = false
+        message(
+            if (truncated) "Imported first ${items.size} files from $folder"
+            else "Imported ${items.size} files from $folder"
+        )
+    }
+
+    fun failImport(reason: String?) {
+        importing = false
+        message("Import failed: ${reason ?: "unknown error"}")
+    }
+
+    var dragMedia by mutableStateOf<MediaItem?>(null)
+        private set
+    var dragPos by mutableStateOf(Offset.Zero)
+        private set
+    var timelineBounds by mutableStateOf(Rect.Zero)
+    var trackBounds by mutableStateOf(Rect.Zero)
+
+    val dropActive: Boolean get() = dragMedia != null && timelineBounds.contains(dragPos)
+
+    fun beginMediaDrag(item: MediaItem, position: Offset) {
+        dragMedia = item
+        dragPos = position
+        message("Drag ${item.name} onto the timeline")
+    }
+
+    fun dragMediaBy(delta: Offset) { dragPos += delta }
+
+    fun endMediaDrag() {
+        val item = dragMedia ?: return
+        dragMedia = null
+        if (timelineBounds.contains(dragPos)) {
+            val width = trackBounds.width.coerceAtLeast(1f)
+            val t = ((dragPos.x - trackBounds.left) / width * TIMELINE_DURATION_SECONDS)
+                .coerceIn(0f, TIMELINE_DURATION_SECONDS - 0.5f)
+            addMediaLayer(item, t)
+        } else {
+            message("Dropped outside the timeline")
+        }
+    }
+
+    fun addMediaLayer(item: MediaItem, start: Float) {
+        val kind = when (item.kind) {
+            MediaKind.Video -> LayerKind.Video
+            MediaKind.Audio -> LayerKind.Audio
+            MediaKind.Image -> LayerKind.Image
+        }
+        val layer = TimelineLayer(
+            id = nextLayerId++,
+            name = item.name,
+            kind = kind,
+            inPoint = start,
+            outPoint = TIMELINE_DURATION_SECONDS,
+            mediaId = item.id,
+        )
+        layers.add(0, layer)
+        selectedLayerId = layer.id
+        message("Added ${item.name} at ${String.format(Locale.US, "%.1f", start)}s")
     }
 
     // ---- Keyboard ---------------------------------------------------------------------
@@ -379,7 +510,7 @@ class WorkspaceState {
 
     companion object {
         val DEFAULT_LEFT_WIDTH = 120.dp
-        val DEFAULT_PROJECT_HEIGHT = 110.dp
+        val DEFAULT_PROJECT_HEIGHT = 170.dp
         val DEFAULT_TIMELINE_HEIGHT = 130.dp
         val DEFAULT_DOCK_HEIGHT = 190.dp
         val MIN_LEFT_WIDTH = 90.dp
