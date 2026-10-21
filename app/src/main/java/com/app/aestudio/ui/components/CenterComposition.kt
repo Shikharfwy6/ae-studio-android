@@ -2,6 +2,8 @@ package com.app.aestudio.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -41,6 +43,8 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextMeasurer
@@ -49,12 +53,17 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
 import com.app.aestudio.ui.state.LayerKind
+import com.app.aestudio.ui.state.POSITION_EFFECT
+import com.app.aestudio.ui.state.PosXRange
+import com.app.aestudio.ui.state.PosYRange
+import com.app.aestudio.ui.state.PosZRange
 import com.app.aestudio.ui.state.TIMELINE_DURATION_SECONDS
 import com.app.aestudio.ui.state.TIMELINE_FPS
 import com.app.aestudio.ui.state.TimelineLayer
@@ -76,6 +85,8 @@ private fun LayerKind.color(): Color = when (this) {
     LayerKind.Text -> AeColors.LayerText
     LayerKind.Image -> AeColors.LayerImage
     LayerKind.Solid -> AeColors.LayerSolid
+    LayerKind.Video -> Color(0xFFE2A04A)
+    LayerKind.Audio -> AeColors.AudioTint
 }
 
 /** Center column: composition viewport on top, timeline at the bottom, draggable divider between. */
@@ -123,11 +134,29 @@ private fun compOrigin(size: Size, scale: Float, pan: Offset): Offset =
 private fun easeInOut(t: Float): Float = t * t * (3f - 2f * t)
 
 /** Layer bounds in composition space (1920x1080), or null when the layer is not on screen at [time]. */
+private const val POSITION_PERSPECTIVE = 1000f
+
+/** Frame after the Position effect: X/Y move the layer, Z scales it with perspective. */
 private fun layerFrame(layers: List<TimelineLayer>, layer: TimelineLayer, time: Float): Rect? {
+    val base = baseFrame(layers, layer, time) ?: return null
+    if (POSITION_EFFECT !in layer.effects) return base
+    val s = POSITION_PERSPECTIVE / (POSITION_PERSPECTIVE + layer.posZ)
+    val c = base.center + Offset(layer.posX, layer.posY)
+    val hw = base.width * s / 2f
+    val hh = base.height * s / 2f
+    return Rect(c.x - hw, c.y - hh, c.x + hw, c.y + hh)
+}
+
+private fun baseFrame(layers: List<TimelineLayer>, layer: TimelineLayer, time: Float): Rect? {
     if (time < layer.inPoint || time > layer.outPoint) return null
     val ordinal = layers.filter { it.kind == layer.kind }.indexOf(layer).coerceAtLeast(0)
     return when (layer.kind) {
         LayerKind.Solid -> Rect(0f, 0f, COMP_W, COMP_H)
+        LayerKind.Audio -> null
+        LayerKind.Video -> {
+            val cy = 540f + ordinal * 60f
+            Rect(560f, cy - 225f, 1360f, cy + 225f)
+        }
         LayerKind.Image -> {
             val p = easeInOut((time / TIMELINE_DURATION_SECONDS).coerceIn(0f, 1f))
             val cx = 520f + (1400f - 520f) * p
@@ -160,6 +189,29 @@ private fun DrawScope.drawLayerContent(
             topLeft = topLeft,
             size = sz
         )
+        LayerKind.Audio -> Unit
+        LayerKind.Video -> {
+            val corner = CornerRadius(12f * scale)
+            drawRoundRect(
+                brush = Brush.linearGradient(listOf(Color(0xFF3A2A12), Color(0xFF1A1208))),
+                topLeft = topLeft, size = sz, cornerRadius = corner
+            )
+            drawRoundRect(
+                color = Color(0xFFE2A04A), topLeft = topLeft, size = sz,
+                cornerRadius = corner, style = Stroke(2.dp.toPx())
+            )
+            val c = origin + frame.center * scale
+            val t = sz.height * 0.18f
+            drawPath(
+                Path().apply {
+                    moveTo(c.x - t * 0.6f, c.y - t)
+                    lineTo(c.x + t, c.y)
+                    lineTo(c.x - t * 0.6f, c.y + t)
+                    close()
+                },
+                Color(0xFFE2A04A)
+            )
+        }
         LayerKind.Image -> {
             val c = origin + frame.center * scale
             val r = sz.width / 2f
@@ -174,7 +226,7 @@ private fun DrawScope.drawLayerContent(
         LayerKind.Text -> {
             val alpha = ((time - layer.inPoint) / 0.6f).coerceIn(0f, 1f)
             val style = TextStyle(
-                fontSize = (96f * scale).toSp(),
+                fontSize = (96f * scale * frame.width / 1200f).toSp(),
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.SansSerif
             )
@@ -275,6 +327,12 @@ private fun CompositionViewport(state: WorkspaceState, modifier: Modifier) {
             if (selectedFrame != null) drawSelection(selectedFrame, origin, scale)
         }
 
+        // Position effect controls (X / Y / Z) for the selected layer
+        val selectedLayer = state.layers.firstOrNull { it.id == state.selectedLayerId }
+        if (selectedLayer != null && POSITION_EFFECT in selectedLayer.effects) {
+            PositionControls(state, selectedLayer, Modifier.align(Alignment.TopStart))
+        }
+
         // Footer: fit button, zoom readout, composition info, timecode
         val percent = (fitScale(viewport.toSize()) * state.compZoom * 100f).roundToInt()
         Row(
@@ -317,7 +375,12 @@ private fun CompositionViewport(state: WorkspaceState, modifier: Modifier) {
 @Composable
 private fun TimelinePanel(state: WorkspaceState, modifier: Modifier) {
     val scroll = rememberScrollState()
-    Column(modifier.background(AeColors.Panel)) {
+    Column(
+        modifier
+            .background(AeColors.Panel)
+            .onGloballyPositioned { state.timelineBounds = it.boundsInRoot() }
+            .then(if (state.dropActive) Modifier.border(2.dp, AeColors.Accent) else Modifier)
+    ) {
         TransportBar(state)
         Row(Modifier.fillMaxWidth().weight(1f)) {
             Column(
@@ -336,7 +399,12 @@ private fun TimelinePanel(state: WorkspaceState, modifier: Modifier) {
                     state.layers.forEach { LayerNameCell(state, it) }
                 }
             }
-            Box(Modifier.weight(1f).fillMaxHeight()) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .onGloballyPositioned { state.trackBounds = it.boundsInRoot() }
+            ) {
                 Column(Modifier.fillMaxSize()) {
                     TimeRuler(state)
                     Column(Modifier.weight(1f).verticalScroll(scroll)) {
@@ -538,5 +606,112 @@ private fun PlayheadOverlay(state: WorkspaceState) {
             close()
         }
         drawPath(head, AeColors.Playhead)
+    }
+}
+
+private val AxisX = Color(0xFFE5534B)
+private val AxisY = Color(0xFF58C46B)
+private val AxisZ = Color(0xFF4A8DF0)
+
+/** Effect controls for Position: drag the X, Y and Z sliders (Z = depth, scales the layer). */
+@Composable
+private fun PositionControls(state: WorkspaceState, layer: TimelineLayer, modifier: Modifier) {
+    val shape = RoundedCornerShape(4.dp)
+    Column(
+        modifier = modifier
+            .padding(6.dp)
+            .fillMaxWidth()
+            .background(AeColors.Panel.copy(alpha = 0.92f), shape)
+            .border(1.dp, AeColors.Hairline, shape)
+            .simTarget(state.simulator, "posctl.card", onTap = { })
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Row(Modifier.fillMaxWidth().height(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Position: ${layer.name}",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = AeColors.TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "Reset",
+                modifier = Modifier
+                    .simClickable(state.simulator, "posctl.reset") { state.resetPosition(layer.id) }
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = AeColors.Accent
+            )
+            Text(
+                text = if (state.positionPanelOpen) "Hide" else "Show",
+                modifier = Modifier
+                    .simClickable(state.simulator, "posctl.toggle") { state.positionPanelOpen = !state.positionPanelOpen }
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = AeColors.Accent
+            )
+        }
+        if (state.positionPanelOpen) {
+            AxisSlider(state, "X", layer.posX, PosXRange, AxisX) { state.setPosition(layer.id, x = it) }
+            AxisSlider(state, "Y", layer.posY, PosYRange, AxisY) { state.setPosition(layer.id, y = it) }
+            AxisSlider(state, "Z", layer.posZ, PosZRange, AxisZ) { state.setPosition(layer.id, z = it) }
+        }
+    }
+}
+
+@Composable
+private fun AxisSlider(
+    state: WorkspaceState,
+    axis: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    color: Color,
+    onChange: (Float) -> Unit,
+) {
+    var width by remember { mutableFloatStateOf(1f) }
+    fun setFromX(x: Float) {
+        val f = (x / width).coerceIn(0f, 1f)
+        onChange(range.start + (range.endInclusive - range.start) * f)
+    }
+    Row(Modifier.fillMaxWidth().height(22.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(axis, modifier = Modifier.width(14.dp), style = AeMono, color = color)
+        Canvas(
+            Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .onSizeChanged { width = it.width.toFloat().coerceAtLeast(1f) }
+                .simTarget(
+                    simulator = state.simulator,
+                    key = "pos.$axis",
+                    priority = 4,
+                    onTap = { setFromX(it.x) },
+                    onDragStart = { setFromX(it.x) },
+                    onDrag = { _, local -> setFromX(local.x) }
+                )
+                .pointerInput(Unit) { detectTapGestures { setFromX(it.x) } }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, _ ->
+                        change.consume()
+                        setFromX(change.position.x)
+                    }
+                }
+        ) {
+            val cy = size.height / 2f
+            val span = range.endInclusive - range.start
+            val zeroX = size.width * (0f - range.start) / span
+            val thumbX = size.width * ((value - range.start) / span).coerceIn(0f, 1f)
+            drawLine(AeColors.Hairline, Offset(0f, cy), Offset(size.width, cy), 2.dp.toPx())
+            drawLine(AeColors.TextDisabled, Offset(zeroX, cy - 5.dp.toPx()), Offset(zeroX, cy + 5.dp.toPx()), 1.dp.toPx())
+            drawLine(color, Offset(zeroX, cy), Offset(thumbX, cy), 2.dp.toPx())
+            drawCircle(color, 6.dp.toPx(), Offset(thumbX, cy))
+        }
+        Text(
+            text = value.roundToInt().toString(),
+            modifier = Modifier.width(40.dp),
+            style = AeMono,
+            color = AeColors.TextPrimary,
+            textAlign = TextAlign.End
+        )
     }
 }
