@@ -28,6 +28,7 @@ import com.app.aestudio.ui.components.CenterComposition
 import com.app.aestudio.ui.components.DividerOrientation
 import com.app.aestudio.ui.components.LeftPanel
 import com.app.aestudio.ui.components.MechanicalKeyboard
+import com.app.aestudio.ui.components.MediaDragGhost
 import com.app.aestudio.ui.components.MenuDropdownOverlay
 import com.app.aestudio.ui.components.ResizerDivider
 import com.app.aestudio.ui.components.Toolbar
@@ -100,6 +101,7 @@ fun AeStudioApp() {
         }
 
         MenuDropdownOverlay(state)
+        MediaDragGhost(state)
         VirtualCursorOverlay(state)
     }
 }
